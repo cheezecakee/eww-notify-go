@@ -26,11 +26,11 @@ type Config struct {
 	Timeout                   Timeout     `toml:"timeout"`
 }
 
-type Orientation int
+type Orientation string
 
 const (
-	Horizontal Orientation = iota
-	Vertical
+	Horizontal Orientation = "h"
+	Vertical   Orientation = "v"
 )
 
 type TimeoutByUrgency struct {
@@ -40,5 +40,17 @@ type TimeoutByUrgency struct {
 }
 
 type Timeout struct {
-	ByUrgency TimeoutByUrgency
+	ByUrgency TimeoutByUrgency `toml:"urgency"`
+}
+
+func (o *Orientation) UnmarshalText(text []byte) error {
+	switch string(text) {
+	case "h":
+		*o = Horizontal
+	case "v":
+		*o = Vertical
+	default:
+		*o = Vertical
+	}
+	return nil
 }
