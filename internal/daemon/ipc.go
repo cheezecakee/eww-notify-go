@@ -203,7 +203,7 @@ func (s *IPCServer) handleCloseCommand(args []string) error {
 func SendIPCCommand(command string) error {
 	conn, err := net.Dial("unix", constants.IPCSocketPath)
 	if err != nil {
-		return fmt.Errorf("daemon is not running, run end first!")
+		return fmt.Errorf("daemon is not running, run end first")
 	}
 	defer conn.Close()
 

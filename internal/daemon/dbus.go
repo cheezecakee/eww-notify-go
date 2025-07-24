@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"log"
 
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/introspect"
@@ -17,11 +18,13 @@ const (
 )
 
 type NotificationServer struct {
-	conn  *dbus.Conn
-	state *state.NotificationState
+	conn   *dbus.Conn
+	state  *state.NotificationState
+	daemon *Daemon // Add reference to daemon
 }
 
 func NewNotificationServer(notificationState *state.NotificationState) (*NotificationServer, error) {
+	log.Println("DEBUG: Creating NotificationServer")
 	conn, err := dbus.ConnectSessionBus()
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to session bus: %w", err)
@@ -33,11 +36,13 @@ func NewNotificationServer(notificationState *state.NotificationState) (*Notific
 	}
 
 	notificationState.DbusConn = conn
+	log.Println("DEBUG: NotificationServer created successfully")
 
 	return server, nil
 }
 
 func (ns *NotificationServer) SetupDBusService() error {
+	log.Println("DEBUG: Setting up DBus service")
 	reply, err := ns.conn.RequestName(NotificationServiceName, dbus.NameFlagAllowReplacement|dbus.NameFlagReplaceExisting)
 	if err != nil {
 		return fmt.Errorf("failed to request service name: %w", err)
@@ -46,6 +51,8 @@ func (ns *NotificationServer) SetupDBusService() error {
 	if reply != dbus.RequestNameReplyPrimaryOwner {
 		return fmt.Errorf("failed to become primary owner of %s", NotificationServiceName)
 	}
+
+	log.Printf("DEBUG: Successfully acquired service name: %s", NotificationServiceName)
 
 	err = ns.conn.Export(ns, NotificationObjectPath, NotificationInterface)
 	if err != nil {
@@ -57,6 +64,7 @@ func (ns *NotificationServer) SetupDBusService() error {
 		return fmt.Errorf("failed to export introspection interface: %w", err)
 	}
 
+	log.Println("DEBUG: DBus service setup complete")
 	return nil
 }
 
@@ -65,10 +73,12 @@ func (ns *NotificationServer) Close() error {
 }
 
 func (ns *NotificationServer) GetServerInformation() (string, string, string, string, *dbus.Error) {
-	return "golang-notication-daemon", "eww", "1.2.0", "1.2", nil
+	log.Println("DEBUG: GetServerInformation called")
+	return "golang-notification-daemon", "eww", "1.2.0", "1.2", nil
 }
 
-func (ns *NotificationServer) GetCapabilitied() ([]string, *dbus.Error) {
+func (ns *NotificationServer) GetCapabilities() ([]string, *dbus.Error) {
+	log.Println("DEBUG: GetCapabilities called")
 	capabilities := []string{
 		"body",
 		"hints",
@@ -90,42 +100,59 @@ func (ns *NotificationServer) Notify(
 	hints map[string]dbus.Variant,
 	expireTimeout int32,
 ) (uint32, *dbus.Error) {
+	log.Printf("DEBUG: Notify called - App: %s, Summary: %s, Body: %s", appName, summary, body)
+	log.Printf("DEBUG: ReplaceID: %d, ExpireTimeout: %d", replacesId, expireTimeout)
+	log.Printf("DEBUG: Actions: %v", actions)
+
+	// Convert dbus.Variant hints to internal format
 	internalHints := make(map[string]any)
 	for key, variant := range hints {
 		internalHints[key] = variant.Value()
-	}
-	// Handle notification creation/update logic here
-	// This will be implemented when we create the main daemon logic
-
-	// For now, return a placeholder ID
-	var notificationId uint32
-	if replacesId != 0 {
-		notificationId = replacesId
-	} else {
-		notificationId = ns.state.NextId()
+		log.Printf("DEBUG: Hint %s = %v (type: %T)", key, variant.Value(), variant.Value())
 	}
 
-	// TODO: Create actual notification object and add to state
-	// This will be implemented in daemon.go
+	// CRITICAL FIX: Actually call the daemon's HandleNotification method
+	if ns.daemon == nil {
+		log.Println("ERROR: Daemon reference is nil!")
+		return 0, dbus.MakeFailedError(fmt.Errorf("daemon not initialized"))
+	}
 
+	notificationId, err := ns.daemon.HandleNotification(
+		appName,
+		replacesId,
+		appIcon,
+		summary,
+		body,
+		actions,
+		internalHints,
+		expireTimeout,
+	)
+	if err != nil {
+		log.Printf("ERROR: Failed to handle notification: %v", err)
+		return 0, dbus.MakeFailedError(err)
+	}
+
+	log.Printf("DEBUG: Notify returning ID: %d", notificationId)
 	return notificationId, nil
 }
 
 func (ns *NotificationServer) CloseNotification(id uint32) *dbus.Error {
+	log.Printf("DEBUG: CloseNotification called for ID: %d", id)
 	found := ns.state.RemoveNotification(id)
 	if !found {
-		return dbus.MakeFailedError(fmt.Errorf("notication with ID %d not found", id))
+		return dbus.MakeFailedError(fmt.Errorf("notification with ID %d not found", id))
 	}
 
 	err := ns.EmitNotificationClosed(id, state.CloseNotification)
 	if err != nil {
-		return dbus.MakeFailedError(fmt.Errorf("failed to emit NotificationClose signal: %w", err))
+		return dbus.MakeFailedError(fmt.Errorf("failed to emit NotificationClosed signal: %w", err))
 	}
 	return nil
 }
 
 // Signal emission methods
 func (ns *NotificationServer) EmitActionInvoked(id uint32, actionKey string) error {
+	log.Printf("DEBUG: Emitting ActionInvoked signal for ID %d, action: %s", id, actionKey)
 	return ns.conn.Emit(
 		NotificationObjectPath,
 		NotificationInterface+".ActionInvoked",
@@ -136,10 +163,11 @@ func (ns *NotificationServer) EmitActionInvoked(id uint32, actionKey string) err
 
 func (ns *NotificationServer) EmitNotificationClosed(id uint32, reason state.NotificationCloseReason) error {
 	reasonId := uint32(reason) + 1
+	log.Printf("DEBUG: Emitting NotificationClosed signal for ID %d, reason: %s (%d)", id, reason.String(), reasonId)
 
 	return ns.conn.Emit(
 		NotificationObjectPath,
-		NotificationInterface+".NoticationClosed",
+		NotificationInterface+".NotificationClosed", // Fix typo: was "NoticationClosed"
 		id,
 		reasonId,
 	)
@@ -187,7 +215,7 @@ func (ns *NotificationServer) GetConnection() *dbus.Conn {
 }
 
 func (ns *NotificationServer) HandleDBusError(err error) *dbus.Error {
-	if err != nil {
+	if err == nil {
 		return nil
 	}
 
