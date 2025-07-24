@@ -41,7 +41,6 @@ func NewDaemon(cfg config.Config) (*Daemon, error) {
 		timeoutTasks: make(map[uint32]context.CancelFunc),
 	}
 
-	// CRITICAL FIX: Connect the dbus server to this daemon
 	dbusServer.daemon = daemon
 
 	return daemon, nil
@@ -89,7 +88,6 @@ func (d *Daemon) HandleNotification(
 
 	var notificationId uint32
 
-	// FIX: Correct the logic here
 	if replaceId != 0 {
 		notificationId = replaceId
 		log.Printf("DEBUG: Using replace ID: %d", replaceId)
@@ -241,48 +239,42 @@ func (d *Daemon) buildWidgetString(notifications []state.Notification) string {
 
 	isVertical := d.config.NotificationOrientation == config.Vertical
 	result := d.buildWidgetWrapper(isVertical, strings.Join(widgets, ""))
+
+	fmt.Printf("=== Final Widget String ===\n%s\n=== End ===\n", result)
+
 	log.Printf("DEBUG: Final widget string: %s", result)
 	return result
 }
 
 func (d *Daemon) buildNotificationWidget(notification state.Notification) string {
-	log.Printf("DEBUG: Building widget for notification ID %d", notification.Id)
+	summary := d.escapeString(notification.Summary)
+	body := d.escapeString(notification.Body)
+	appName := d.escapeString(notification.AppName)
+	appIcon := d.escapeString(notification.AppIcon)
+	hints := d.buildHintsString(notification.Hints)
 
-	// Build JSON-like data structure for the notification
-	// This needs to match what eww.yuck expects
-	notificationData := fmt.Sprintf(`{
-		"id": %d,
-		"summary": "%s",
-		"body": "%s",
-		"app_name": "%s",
-		"app_icon": "%s",
-		"hints": {%s}
-	}`,
+	// Build Eww-style object
+	notificationObject := fmt.Sprintf(`{ id: %d, summary: "%s", body: "%s", app_name: "%s", app_icon: "%s", hints: { %s } }`,
 		notification.Id,
-		d.escapeString(notification.Summary),
-		d.escapeString(notification.Body),
-		d.escapeString(notification.AppName),
-		d.escapeString(notification.AppIcon),
-		d.buildHintsString(notification.Hints),
+		summary,
+		body,
+		appName,
+		appIcon,
+		hints,
 	)
 
-	// Check if this is a battery notification
+	// Widget selector
 	if notifyType, exists := notification.Hints["type"]; exists {
 		if typeStr, ok := notifyType.(string); ok && typeStr == "battery" {
-			log.Println("DEBUG: Building battery notification widget")
-			return fmt.Sprintf("(battery-notification :notification %s)", notificationData)
+			return fmt.Sprintf("(battery-notification :notification %s)", notificationObject)
 		}
 	}
 
-	// Check for custom widget
 	if notification.Widget != nil {
-		log.Printf("DEBUG: Using custom widget: %s", *notification.Widget)
-		return fmt.Sprintf("(%s :notification %s)", *notification.Widget, notificationData)
+		return fmt.Sprintf("(%s :notification %s)", *notification.Widget, notificationObject)
 	}
 
-	// Use default widget
-	log.Println("DEBUG: Building default notification widget")
-	return fmt.Sprintf("(base-notification :notification %s)", notificationData)
+	return fmt.Sprintf("(base-notification :notification %s)", notificationObject)
 }
 
 func (d *Daemon) buildWidgetWrapper(isVertical bool, widgets string) string {
@@ -311,7 +303,7 @@ func (d *Daemon) buildHintsString(hints map[string]any) string {
 			valueStr = fmt.Sprintf(`"%v"`, d.escapeString(fmt.Sprintf("%v", v)))
 		}
 
-		hintPairs = append(hintPairs, fmt.Sprintf(`"%s": %s`, key, valueStr))
+		hintPairs = append(hintPairs, fmt.Sprintf(`%s: %s`, key, valueStr))
 	}
 
 	return strings.Join(hintPairs, ", ")
@@ -351,7 +343,7 @@ func (d *Daemon) cleanupLoop() {
 // Eww command helpers
 func (d *Daemon) setEwwValue(variable, value string) error {
 	log.Printf("DEBUG: Setting eww variable %s to: %s", variable, value)
-	cmd := exec.Command("eww", "update", fmt.Sprintf("%s=%s", variable, value))
+	cmd := exec.Command("eww", "update", fmt.Sprintf("%s='%s'", variable, value))
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		log.Printf("ERROR: eww update failed: %v, output: %s", err, string(output))
