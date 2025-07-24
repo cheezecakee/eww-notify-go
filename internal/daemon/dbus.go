@@ -111,7 +111,6 @@ func (ns *NotificationServer) Notify(
 		log.Printf("DEBUG: Hint %s = %v (type: %T)", key, variant.Value(), variant.Value())
 	}
 
-	// CRITICAL FIX: Actually call the daemon's HandleNotification method
 	if ns.daemon == nil {
 		log.Println("ERROR: Daemon reference is nil!")
 		return 0, dbus.MakeFailedError(fmt.Errorf("daemon not initialized"))
@@ -167,7 +166,7 @@ func (ns *NotificationServer) EmitNotificationClosed(id uint32, reason state.Not
 
 	return ns.conn.Emit(
 		NotificationObjectPath,
-		NotificationInterface+".NotificationClosed", // Fix typo: was "NoticationClosed"
+		NotificationInterface+".NotificationClosed",
 		id,
 		reasonId,
 	)

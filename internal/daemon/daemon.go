@@ -47,7 +47,6 @@ func NewDaemon(cfg config.Config) (*Daemon, error) {
 }
 
 func (d *Daemon) Start() error {
-	log.Println("DEBUG: Starting daemon")
 	if err := d.dbusServer.SetupDBusService(); err != nil {
 		return fmt.Errorf("failed to setup DBus service: %w", err)
 	}
@@ -90,16 +89,13 @@ func (d *Daemon) HandleNotification(
 
 	if replaceId != 0 {
 		notificationId = replaceId
-		log.Printf("DEBUG: Using replace ID: %d", replaceId)
 	} else {
 		notificationId = d.state.NextId()
-		log.Printf("DEBUG: Generated new ID: %d", notificationId)
 	}
 
 	// Determine timeout from hints and config
 	urgency := dbus.GetUrgency(hints)
 	urgencyKey := dbus.ConfigKeyUrgency(urgency)
-	log.Printf("DEBUG: Urgency: %d (%s)", urgency, urgencyKey)
 
 	var timeout uint32
 	switch urgencyKey {
@@ -110,7 +106,6 @@ func (d *Daemon) HandleNotification(
 	default: // "normal"
 		timeout = d.config.Timeout.ByUrgency.Normal
 	}
-	log.Printf("DEBUG: Timeout: %d seconds", timeout)
 
 	// Create notification
 	notification := state.Notification{
@@ -127,39 +122,29 @@ func (d *Daemon) HandleNotification(
 		Widget:     d.config.EwwDefaultNotificationKey,
 	}
 
-	log.Printf("DEBUG: Created notification: %+v", notification)
-
 	d.state.AddNotification(notification)
-	log.Printf("DEBUG: Added notification to state. Total notifications: %d", len(d.state.GetNotifications()))
 
 	if timeout > 0 {
 		d.scheduleTimeout(notificationId, time.Duration(timeout)*time.Second)
-		log.Printf("DEBUG: Scheduled timeout for %d seconds", timeout)
 	}
 
 	if err := d.updateDisplay(); err != nil {
-		log.Printf("ERROR: Failed to update display: %v", err)
 		return notificationId, fmt.Errorf("failed to update display: %w", err)
 	}
 
-	log.Printf("DEBUG: Successfully handled notification %d", notificationId)
 	return notificationId, nil
 }
 
 func (d *Daemon) RemoveNotification(id uint32) error {
-	log.Printf("DEBUG: Removing notification %d", id)
-
 	if cancel, exists := d.timeoutTasks[id]; exists {
 		cancel()
 		delete(d.timeoutTasks, id)
-		log.Printf("DEBUG: Cancelled timeout task for notification %d", id)
 	}
 
 	if !d.state.RemoveNotification(id) {
 		return fmt.Errorf("notification with ID %d not found", id)
 	}
 
-	log.Printf("DEBUG: Notification %d removed from state", id)
 	return d.updateDisplay()
 }
 
@@ -182,25 +167,20 @@ func (d *Daemon) scheduleTimeout(id uint32, duration time.Duration) {
 	go func() {
 		select {
 		case <-time.After(duration):
-			log.Printf("DEBUG: Timeout reached for notification %d", id)
 			d.state.RemoveNotification(id)
 			d.dbusServer.EmitNotificationClosed(id, state.Expired)
 			d.updateDisplay()
 			delete(d.timeoutTasks, id)
 		case <-ctx.Done():
-			log.Printf("DEBUG: Timeout cancelled for notification %d", id)
 			return
 		}
 	}()
 }
 
 func (d *Daemon) updateDisplay() error {
-	log.Println("DEBUG: Updating display")
 	notifications := d.state.GetNotifications()
-	log.Printf("DEBUG: Current notifications count: %d", len(notifications))
 
 	if len(notifications) == 0 {
-		log.Println("DEBUG: No notifications, closing window if configured")
 		if d.config.EwwWindow != nil {
 			return d.closeEwwWindow(*d.config.EwwWindow)
 		}
@@ -213,27 +193,21 @@ func (d *Daemon) updateDisplay() error {
 	log.Printf("DEBUG: Built widget string: %s", widgetString)
 
 	if err := d.setEwwValue("end-notifications", widgetString); err != nil {
-		log.Printf("ERROR: Failed to set eww value: %v", err)
 		return fmt.Errorf("failed to set eww value: %w", err)
 	}
 
 	if d.config.EwwWindow != nil {
-		log.Printf("DEBUG: Opening eww window: %s", *d.config.EwwWindow)
 		return d.openEwwWindow(*d.config.EwwWindow)
 	}
 
-	log.Println("DEBUG: No eww window configured")
 	return nil
 }
 
 func (d *Daemon) buildWidgetString(notifications []state.Notification) string {
-	log.Printf("DEBUG: Building widget string for %d notifications", len(notifications))
 	var widgets []string
 
-	for i, notification := range notifications {
-		log.Printf("DEBUG: Building widget for notification %d: %+v", i, notification)
+	for _, notification := range notifications {
 		widget := d.buildNotificationWidget(notification)
-		log.Printf("DEBUG: Built widget %d: %s", i, widget)
 		widgets = append(widgets, widget)
 	}
 
@@ -242,7 +216,6 @@ func (d *Daemon) buildWidgetString(notifications []state.Notification) string {
 
 	fmt.Printf("=== Final Widget String ===\n%s\n=== End ===\n", result)
 
-	log.Printf("DEBUG: Final widget string: %s", result)
 	return result
 }
 
@@ -263,17 +236,19 @@ func (d *Daemon) buildNotificationWidget(notification state.Notification) string
 		hints,
 	)
 
-	// Widget selector
+	// Widget selector - directly return the appropriate widget call
 	if notifyType, exists := notification.Hints["type"]; exists {
 		if typeStr, ok := notifyType.(string); ok && typeStr == "battery" {
 			return fmt.Sprintf("(battery-notification :notification %s)", notificationObject)
 		}
 	}
 
+	// Check if a custom widget is specified
 	if notification.Widget != nil {
 		return fmt.Sprintf("(%s :notification %s)", *notification.Widget, notificationObject)
 	}
 
+	// Default to base-notification
 	return fmt.Sprintf("(base-notification :notification %s)", notificationObject)
 }
 
@@ -342,37 +317,28 @@ func (d *Daemon) cleanupLoop() {
 
 // Eww command helpers
 func (d *Daemon) setEwwValue(variable, value string) error {
-	log.Printf("DEBUG: Setting eww variable %s to: %s", variable, value)
-	cmd := exec.Command("eww", "update", fmt.Sprintf("%s='%s'", variable, value))
-	output, err := cmd.CombinedOutput()
+	cmd := exec.Command("eww", "update", fmt.Sprintf("%s=%s", variable, value))
+	_, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("ERROR: eww update failed: %v, output: %s", err, string(output))
 		return err
 	}
-	log.Printf("DEBUG: eww update successful")
 	return nil
 }
 
 func (d *Daemon) openEwwWindow(window string) error {
-	log.Printf("DEBUG: Opening eww window: %s", window)
 	cmd := exec.Command("eww", "open", window)
-	output, err := cmd.CombinedOutput()
+	_, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("ERROR: eww open failed: %v, output: %s", err, string(output))
 		return err
 	}
-	log.Printf("DEBUG: eww window opened successfully")
 	return nil
 }
 
 func (d *Daemon) closeEwwWindow(window string) error {
-	log.Printf("DEBUG: Closing eww window: %s", window)
 	cmd := exec.Command("eww", "close", window)
-	output, err := cmd.CombinedOutput()
+	_, err := cmd.CombinedOutput()
 	if err != nil {
-		log.Printf("ERROR: eww close failed: %v, output: %s", err, string(output))
 		return err
 	}
-	log.Printf("DEBUG: eww window closed successfully")
 	return nil
 }
