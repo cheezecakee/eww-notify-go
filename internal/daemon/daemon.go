@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os/exec"
@@ -107,6 +108,13 @@ func (d *Daemon) HandleNotification(
 		timeout = d.config.Timeout.ByUrgency.Normal
 	}
 
+	// Force timeout for battery notifications if they're set to 0 (persistent)
+	if notifyType, exists := hints["type"]; exists {
+		if typeStr, ok := notifyType.(string); ok && typeStr == "battery" && timeout == 0 {
+			timeout = 10 // 10 seconds default for battery notifications
+		}
+	}
+
 	// Create notification
 	notification := state.Notification{
 		Id:         notificationId,
@@ -125,7 +133,10 @@ func (d *Daemon) HandleNotification(
 	d.state.AddNotification(notification)
 
 	if timeout > 0 {
+		log.Printf("DEBUG: Scheduling timeout for notification %d: %d seconds", notificationId, timeout)
 		d.scheduleTimeout(notificationId, time.Duration(timeout)*time.Second)
+	} else {
+		log.Printf("DEBUG: No timeout set for notification %d (timeout=0)", notificationId)
 	}
 
 	if err := d.updateDisplay(); err != nil {
@@ -208,7 +219,9 @@ func (d *Daemon) buildWidgetString(notifications []state.Notification) string {
 
 	for _, notification := range notifications {
 		widget := d.buildNotificationWidget(notification)
-		widgets = append(widgets, widget)
+		// Wrap each notification in a container for consistent spacing
+		wrappedWidget := fmt.Sprintf("(box :class \"notification-container\" %s)", widget)
+		widgets = append(widgets, wrappedWidget)
 	}
 
 	isVertical := d.config.NotificationOrientation == config.Vertical
@@ -220,36 +233,63 @@ func (d *Daemon) buildWidgetString(notifications []state.Notification) string {
 }
 
 func (d *Daemon) buildNotificationWidget(notification state.Notification) string {
-	summary := d.escapeString(notification.Summary)
-	body := d.escapeString(notification.Body)
-	appName := d.escapeString(notification.AppName)
-	appIcon := d.escapeString(notification.AppIcon)
-	hints := d.buildHintsString(notification.Hints)
+	// Create a proper JSON object
+	notificationData := map[string]any{
+		"id":       notification.Id,
+		"summary":  notification.Summary,
+		"body":     notification.Body,
+		"app_name": notification.AppName,
+		"app_icon": notification.AppIcon,
+		"hints":    notification.Hints,
+		"actions":  d.buildActionsArray(notification.Actions),
+	}
 
-	// Build Eww-style object
-	notificationObject := fmt.Sprintf(`{ id: %d, summary: "%s", body: "%s", app_name: "%s", app_icon: "%s", hints: { %s } }`,
-		notification.Id,
-		summary,
-		body,
-		appName,
-		appIcon,
-		hints,
-	)
+	// Convert to JSON string
+	jsonBytes, err := json.Marshal(notificationData)
+	if err != nil {
+		log.Printf("ERROR: Failed to marshal notification to JSON: %v", err)
+		return ""
+	}
+
+	// Escape the JSON string for use in eww
+	jsonString := d.escapeJsonForEww(string(jsonBytes))
 
 	// Widget selector - directly return the appropriate widget call
 	if notifyType, exists := notification.Hints["type"]; exists {
 		if typeStr, ok := notifyType.(string); ok && typeStr == "battery" {
-			return fmt.Sprintf("(battery-notification :notification %s)", notificationObject)
+			return fmt.Sprintf("(battery-notification :notification \"%s\")", jsonString)
 		}
 	}
 
 	// Check if a custom widget is specified
 	if notification.Widget != nil {
-		return fmt.Sprintf("(%s :notification %s)", *notification.Widget, notificationObject)
+		return fmt.Sprintf("(%s :notification \"%s\")", *notification.Widget, jsonString)
 	}
 
 	// Default to base-notification
-	return fmt.Sprintf("(base-notification :notification %s)", notificationObject)
+	return fmt.Sprintf("(base-notification :notification \"%s\")", jsonString)
+}
+
+func (d *Daemon) buildActionsArray(actions []string) []map[string]string {
+	var actionArray []map[string]string
+
+	for i := 0; i < len(actions); i += 2 {
+		if i+1 < len(actions) {
+			actionArray = append(actionArray, map[string]string{
+				"key":  actions[i],
+				"name": actions[i+1],
+			})
+		}
+	}
+
+	return actionArray
+}
+
+func (d *Daemon) escapeJsonForEww(jsonStr string) string {
+	// Escape quotes and backslashes for eww
+	jsonStr = strings.ReplaceAll(jsonStr, "\\", "\\\\")
+	jsonStr = strings.ReplaceAll(jsonStr, "\"", "\\\"")
+	return jsonStr
 }
 
 func (d *Daemon) buildWidgetWrapper(isVertical bool, widgets string) string {
@@ -258,37 +298,6 @@ func (d *Daemon) buildWidgetWrapper(isVertical bool, widgets string) string {
 		orientation = "horizontal"
 	}
 	return fmt.Sprintf("(box :space-evenly false :orientation \"%s\" %s)", orientation, widgets)
-}
-
-func (d *Daemon) buildHintsString(hints map[string]any) string {
-	var hintPairs []string
-
-	for key, value := range hints {
-		var valueStr string
-		switch v := value.(type) {
-		case string:
-			valueStr = fmt.Sprintf(`"%s"`, d.escapeString(v))
-		case bool:
-			valueStr = fmt.Sprintf(`%t`, v)
-		case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64:
-			valueStr = fmt.Sprintf(`%v`, v)
-		case float32, float64:
-			valueStr = fmt.Sprintf(`%v`, v)
-		default:
-			valueStr = fmt.Sprintf(`"%v"`, d.escapeString(fmt.Sprintf("%v", v)))
-		}
-
-		hintPairs = append(hintPairs, fmt.Sprintf(`%s: %s`, key, valueStr))
-	}
-
-	return strings.Join(hintPairs, ", ")
-}
-
-func (d *Daemon) escapeString(s string) string {
-	s = strings.ReplaceAll(s, "\\", "\\\\")
-	s = strings.ReplaceAll(s, "\"", "\\\"")
-	s = strings.ReplaceAll(s, "\n", " ")
-	return s
 }
 
 func (d *Daemon) cleanupLoop() {
